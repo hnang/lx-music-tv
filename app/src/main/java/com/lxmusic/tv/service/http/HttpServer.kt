@@ -271,6 +271,22 @@ class HttpServer(
                     .playlist-result.success { display: block; background: rgba(78,205,196,0.15); color: #4ecdc4; }
                     .playlist-result.error { display: block; background: rgba(255,107,107,0.15); color: #ff6b6b; }
                     footer { text-align: center; padding: 20px; color: #666; font-size: 0.9em; }
+                    .toast-container {
+                        position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+                        z-index: 1000; display: flex; flex-direction: column; align-items: center; gap: 10px;
+                        pointer-events: none;
+                    }
+                    .toast {
+                        padding: 12px 20px; border-radius: 8px; font-size: 0.95em;
+                        background: rgba(26, 26, 46, 0.96); color: #fff;
+                        border: 1px solid rgba(255,255,255,0.15);
+                        box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+                        opacity: 0; transform: translateY(-10px); transition: all 0.3s ease;
+                        max-width: 80vw; text-align: center; pointer-events: auto;
+                    }
+                    .toast.show { opacity: 1; transform: translateY(0); }
+                    .toast.success { border-color: #4ecdc4; }
+                    .toast.error { border-color: #ff6b6b; }
                 </style>
             </head>
             <body>
@@ -355,7 +371,23 @@ class HttpServer(
                     </div>
                 </div>
 
+                <!-- Toast 提示容器 -->
+                <div class="toast-container" id="toast-container"></div>
+
                 <script>
+                    function showToast(message, type) {
+                        var container = document.getElementById('toast-container');
+                        var toast = document.createElement('div');
+                        toast.className = 'toast' + (type ? ' ' + type : '');
+                        toast.textContent = message;
+                        container.appendChild(toast);
+                        requestAnimationFrame(function() { toast.classList.add('show'); });
+                        setTimeout(function() {
+                            toast.classList.remove('show');
+                            setTimeout(function() { toast.remove(); }, 300);
+                        }, 2500);
+                    }
+
                     document.addEventListener('DOMContentLoaded', function() {
                         loadSources();
                         updateAccessUrl();
@@ -427,7 +459,7 @@ class HttpServer(
 
                     function uploadFile(file) {
                         if (!file.name.endsWith('.js')) {
-                            alert('请选择JS格式的播放源文件'); return;
+                            showToast('请选择JS格式的播放源文件', 'error'); return;
                         }
                         var formData = new FormData();
                         formData.append('file', file);
@@ -455,27 +487,27 @@ class HttpServer(
                                     var result = JSON.parse(xhr.responseText);
                                     if (result.success) {
                                         setProgress(100);
-                                        alert('上传成功: ' + result.message);
+                                        showToast('上传成功: ' + result.message, 'success');
                                         loadSources();
                                     } else {
-                                        alert('上传失败: ' + result.message);
+                                        showToast('上传失败: ' + result.message, 'error');
                                     }
                                 } catch (err) {
-                                    alert('上传失败: 响应解析错误');
+                                    showToast('上传失败: 响应解析错误', 'error');
                                 }
                             } else {
-                                alert('上传失败: HTTP ' + xhr.status);
+                                showToast('上传失败: HTTP ' + xhr.status, 'error');
                             }
                         };
                         xhr.onerror = function() {
                             progressWrap.style.display = 'none';
-                            alert('上传失败: 网络错误');
+                            showToast('上传失败: 网络错误', 'error');
                         };
                         // 超时控制：15s 未完成（含上传+等待响应）即提示
                         xhr.timeout = 15000;
                         xhr.ontimeout = function() {
                             progressWrap.style.display = 'none';
-                            alert('上传超时，请重试');
+                            showToast('上传超时，请重试', 'error');
                         };
                         xhr.open('POST', '/api/sources/upload');
                         xhr.send(formData);
@@ -489,8 +521,8 @@ class HttpServer(
                                 body: 'id=' + encodeURIComponent(id) + '&enable=' + enable
                             });
                             var result = await response.json();
-                            if (result.success) loadSources(); else alert('操作失败: ' + result.message);
-                        } catch (error) { alert('操作失败: ' + error.message); }
+                            if (result.success) loadSources(); else showToast('操作失败: ' + result.message, 'error');
+                        } catch (error) { showToast('操作失败: ' + error.message, 'error'); }
                     }
 
                     async function deleteSource(id) {
@@ -502,8 +534,8 @@ class HttpServer(
                                 body: 'id=' + encodeURIComponent(id)
                             });
                             var result = await response.json();
-                            if (result.success) loadSources(); else alert('删除失败: ' + result.message);
-                        } catch (error) { alert('删除失败: ' + error.message); }
+                            if (result.success) loadSources(); else showToast('删除失败: ' + result.message, 'error');
+                        } catch (error) { showToast('删除失败: ' + error.message, 'error'); }
                     }
 
                     function updateAccessUrl() {
@@ -574,7 +606,7 @@ class HttpServer(
 
                     async function savePlatforms() {
                         if (!currentPlatformSourceId) {
-                            alert('请先选择要配置的播放源');
+                            showToast('请先选择要配置的播放源', 'error');
                             return;
                         }
                         try {
@@ -588,11 +620,11 @@ class HttpServer(
                             if (result.success) {
                                 closePlatformModal();
                                 loadSources();
-                                alert('平台配置已保存');
+                                showToast('平台配置已保存', 'success');
                             } else {
-                                alert('保存失败: ' + result.message);
+                                showToast('保存失败: ' + result.message, 'error');
                             }
-                        } catch (error) { alert('保存失败: ' + error.message); }
+                        } catch (error) { showToast('保存失败: ' + error.message, 'error'); }
                     }
 
                     // 点击遮罩层关闭
