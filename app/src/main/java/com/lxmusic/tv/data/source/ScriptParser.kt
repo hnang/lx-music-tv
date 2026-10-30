@@ -191,28 +191,14 @@ class ScriptParser {
 
     /**
      * 验证脚本格式
-     * 兼容洛雪官方/第三方音源，包括混淆后的音源：
-     * - 宿主 API 可能是点号写法 globalThis.lx，也可能是方括号写法 globalThis['lx']；
-     * - 注册调用可能是字面量 send(...) / EVENT_NAMES.inited，也可能在混淆后被包装（send 作为实参传入、EVENT_NAMES 用计算下标访问）。
+     * 对齐 lx-music-mobile 的 addUserApi 校验（data.ts）：仅要求脚本以 /* ... */ 块注释开头。
+     * mobile 导入自定义源时不校验 globalThis.lx / send( / EVENT_NAMES 等关键字，
+     * TV 端此前校验过严（强制匹配这些字面量）会误判部分正常音源为「脚本格式不正确」，
+     * 故放宽到与 mobile 一致，保证 mobile 能导入的音源 TV 端同样能导入。
      */
     private fun validateScript(scriptContent: String): Boolean {
-        // 1. 必须有 @name 元数据（洛雪音源标识）
-        if (!scriptContent.contains("@name")) return false
-
-        // 2. 必须引用洛雪宿主 API 对象 globalThis.lx（兼容点号与方括号两种写法）
-        val referencesLxApi = scriptContent.contains("globalThis.lx")
-            || scriptContent.contains("globalThis['lx']")
-            || scriptContent.contains("globalThis[\"lx\"]")
-        if (!referencesLxApi) return false
-
-        // 3. 必须注册音源：调用 send(...) 或通过 EVENT_NAMES 监听 inited 事件。
-        //    兼容混淆源（send 经包装函数调用、EVENT_NAMES 用计算下标访问，无字面量 send( / EVENT_NAMES.inited）。
-        val registersSource = scriptContent.contains("send(")
-            || scriptContent.contains("EVENT_NAMES.inited")
-            || (scriptContent.contains("send") && scriptContent.contains("EVENT_NAMES"))
-        if (!registersSource) return false
-
-        return true
+        // 以 /* ... */ 块注释开头（洛雪音源标准头，等价于 mobile 的 /^\/\*[\S|\s]+?\*\//）
+        return Regex("""^/\*[\s\S]+?\*/""").find(scriptContent) != null
     }
 }
 
