@@ -1,18 +1,12 @@
 package com.lxmusic.tv.service.http
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.net.wifi.WifiManager
 import android.text.format.Formatter
 import android.util.Log
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
 import com.lxmusic.tv.data.model.MusicSource
 import com.lxmusic.tv.data.source.ScriptParser
 import fi.iki.elonen.NanoHTTPD
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -135,7 +129,6 @@ class HttpServer(
             // 2.8 异常日志导出（GET /log，?download=1 触发下载）
             uri == "/log" -> serveLog(session)
             uri == "/api/status" -> serveStatus()
-            uri == "/api/qrcode" && method == Method.GET -> serveQrCode()
             uri.startsWith("/static/") -> serveStaticFile(uri)
             else -> serveNotFound()
         }
@@ -345,11 +338,6 @@ class HttpServer(
                     <footer>
                         <p>LX Music TV - Android TV 音乐播放器</p>
                         <p style="margin-top: 5px;">访问地址: <span id="access-url"></span></p>
-                        <div style="margin-top: 14px;">
-                            <img src="/api/qrcode" alt="管理页二维码"
-                                 style="width: 180px; height: 180px; border-radius: 8px; background: #fff; padding: 8px;">
-                        </div>
-                        <p style="color: #888; font-size: 0.85em; margin-top: 8px;">手机扫码即可打开管理页</p>
                     </footer>
                 </div>
 
@@ -923,45 +911,6 @@ class HttpServer(
         )
         val json = com.lxmusic.tv.util.JsonUtil.toJson(status)
         return newFixedLengthResponse(Response.Status.OK, "application/json", json)
-    }
-
-    /**
-     * 生成管理页访问地址二维码（ZXing 生成 PNG，供手机扫码打开管理页）
-     */
-    private fun serveQrCode(): Response {
-        return try {
-            val text = getAccessUrl()
-            if (text.isBlank()) return serveNotFound()
-            val writer = QRCodeWriter()
-            val hints = mapOf(
-                EncodeHintType.MARGIN to 1,
-                EncodeHintType.CHARACTER_SET to "UTF-8"
-            )
-            val matrix = writer.encode(text, BarcodeFormat.QR_CODE, 300, 300, hints)
-            val width = matrix.width
-            val height = matrix.height
-            val pixels = IntArray(width * height)
-            for (y in 0 until height) {
-                val offset = y * width
-                for (x in 0 until width) {
-                    pixels[offset + x] = if (matrix.get(x, y)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
-                }
-            }
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            val baos = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
-            val bytes = baos.toByteArray()
-            newFixedLengthResponse(
-                Response.Status.OK,
-                "image/png",
-                ByteArrayInputStream(bytes),
-                bytes.size.toLong()
-            )
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
-            Log.e(TAG, "生成二维码失败: ${e.message}", e)
-            serveNotFound()
-        }
     }
 
     /**
