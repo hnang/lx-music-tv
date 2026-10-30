@@ -132,10 +132,6 @@ class HttpServer(
             uri.startsWith("/static/") -> serveStaticFile(uri)
             else -> serveNotFound()
         }
-        // 禁用 HTTP keep-alive：NanoHTTPD 2.3.1 默认固定线程池（16 线程），浏览器 keep-alive 连接
-        // 若不及时释放会占满线程池，导致后续请求排队、页面加载慢甚至无响应（也是上传"无反应"的根源之一）。
-        // 本地管理页无连接复用需求，统一 Connection: close，每个请求处理完立即关闭连接、归还线程。
-        response.addHeader("Connection", "close")
         return response
     }
 
