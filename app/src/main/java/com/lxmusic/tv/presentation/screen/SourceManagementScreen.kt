@@ -1,6 +1,7 @@
 package com.lxmusic.tv.presentation.screen
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -324,6 +325,27 @@ fun ServerStatusCard(
                     // 2.5 浅色主题：深卡片上的次级文字（白70%）
                     color = LXOnCardDarkSecondary
                 )
+                // 二维码：手机扫码直达管理页（复用 generateQrCode，zxing 本地生成；remember 避免每次重组重算）
+                val qr = remember(serverUrl) { generateQrCode(serverUrl, 240) }
+                if (qr != null) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Image(
+                        bitmap = qr,
+                        contentDescription = "管理页二维码",
+                        modifier = Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .size(220.dp)
+                            .background(Color.White, RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "手机扫码快速打开管理页",
+                        fontSize = 12.sp,
+                        color = LXOnCardDarkSecondary,
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+                }
             }
         }
     }

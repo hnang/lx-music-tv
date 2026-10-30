@@ -1799,8 +1799,9 @@ private fun SearchQrDialog(
 
 /**
  * 2.8 生成二维码 ImageBitmap（zxing core，纯本地编码）
+ * internal：供本包内多个界面复用（搜索推送弹窗、源管理页 HTTP 地址二维码）
  */
-private fun generateQrCode(content: String, size: Int = 300): androidx.compose.ui.graphics.ImageBitmap? {
+internal fun generateQrCode(content: String, size: Int = 300): androidx.compose.ui.graphics.ImageBitmap? {
     return try {
         val hints = mapOf(com.google.zxing.EncodeHintType.MARGIN to 1)
         val matrix = com.google.zxing.qrcode.QRCodeWriter()
