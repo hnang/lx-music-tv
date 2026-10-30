@@ -1,12 +1,18 @@
 package com.lxmusic.tv.service.http
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.wifi.WifiManager
 import android.text.format.Formatter
 import android.util.Log
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import com.lxmusic.tv.data.model.MusicSource
 import com.lxmusic.tv.data.source.ScriptParser
 import fi.iki.elonen.NanoHTTPD
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -129,6 +135,7 @@ class HttpServer(
             // 2.8 异常日志导出（GET /log，?download=1 触发下载）
             uri == "/log" -> serveLog(session)
             uri == "/api/status" -> serveStatus()
+            uri == "/api/qrcode" && method == Method.GET -> serveQrCode()
             uri.startsWith("/static/") -> serveStaticFile(uri)
             else -> serveNotFound()
         }
@@ -199,6 +206,10 @@ class HttpServer(
                     .upload-area:hover { border-color: #ff6b6b; background: rgba(255, 107, 107, 0.1); }
                     .upload-area.dragover { border-color: #4ecdc4; background: rgba(78, 205, 196, 0.1); }
                     .upload-icon { font-size: 48px; margin-bottom: 15px; }
+                    .upload-progress { margin-top: 15px; display: none; }
+                    .progress-bar { background: rgba(255, 255, 255, 0.15); border-radius: 10px; height: 8px; overflow: hidden; }
+                    .progress-fill { background: #4ecdc4; height: 100%; width: 0%; transition: width 0.2s ease; }
+                    .progress-text { color: #888; font-size: 0.85em; margin-top: 6px; text-align: center; }
                     .source-list { list-style: none; }
                     .source-item {
                         display: flex; align-items: center; justify-content: space-between;
@@ -294,6 +305,10 @@ class HttpServer(
                             <p style="color: #888; margin-top: 10px;">支持洛雪音乐播放源格式 (.js)</p>
                             <input type="file" id="file-input" accept=".js" style="display: none;">
                         </div>
+                        <div class="upload-progress" id="upload-progress" style="display:none;">
+                            <div class="progress-bar"><div class="progress-fill" id="progress-fill" style="width:0%"></div></div>
+                            <div class="progress-text" id="progress-text">0%</div>
+                        </div>
                     </div>
 
                     <div class="card">
@@ -330,6 +345,11 @@ class HttpServer(
                     <footer>
                         <p>LX Music TV - Android TV 音乐播放器</p>
                         <p style="margin-top: 5px;">访问地址: <span id="access-url"></span></p>
+                        <div style="margin-top: 14px;">
+                            <img src="/api/qrcode" alt="管理页二维码"
+                                 style="width: 180px; height: 180px; border-radius: 8px; background: #fff; padding: 8px;">
+                        </div>
+                        <p style="color: #888; font-size: 0.85em; margin-top: 8px;">手机扫码即可打开管理页</p>
                     </footer>
                 </div>
 
@@ -417,34 +437,60 @@ class HttpServer(
                         }
                     }
 
-                    async function uploadFile(file) {
+                    function uploadFile(file) {
                         if (!file.name.endsWith('.js')) {
                             alert('请选择JS格式的播放源文件'); return;
                         }
                         var formData = new FormData();
                         formData.append('file', file);
-                        // 超时控制：后端异常导致连接挂起时不再无限等待，15s 未返回即提示超时
-                        var controller = new AbortController();
-                        var timeoutId = setTimeout(function() { controller.abort(); }, 15000);
-                        try {
-                            var response = await fetch('/api/sources/upload', {
-                                method: 'POST', body: formData, signal: controller.signal
-                            });
-                            clearTimeout(timeoutId);
-                            var result = await response.json();
-                            if (result.success) {
-                                alert('上传成功: ' + result.message); loadSources();
-                            } else {
-                                alert('上传失败: ' + result.message);
-                            }
-                        } catch (error) {
-                            clearTimeout(timeoutId);
-                            if (error.name === 'AbortError') {
-                                alert('上传超时，请重试');
-                            } else {
-                                alert('上传失败: ' + error.message);
-                            }
+                        // 显示上传进度条
+                        var progressWrap = document.getElementById('upload-progress');
+                        var progressFill = document.getElementById('progress-fill');
+                        var progressText = document.getElementById('progress-text');
+                        progressWrap.style.display = 'block';
+                        setProgress(0);
+                        function setProgress(pct) {
+                            progressFill.style.width = pct + '%';
+                            progressText.textContent = pct + '%';
                         }
+                        // 用 XMLHttpRequest 实现上传进度（fetch 不支持上传进度事件）
+                        var xhr = new XMLHttpRequest();
+                        xhr.upload.onprogress = function(e) {
+                            if (e.lengthComputable) {
+                                setProgress(Math.round(e.loaded / e.total * 100));
+                            }
+                        };
+                        xhr.onload = function() {
+                            progressWrap.style.display = 'none';
+                            if (xhr.status >= 200 && xhr.status < 300) {
+                                try {
+                                    var result = JSON.parse(xhr.responseText);
+                                    if (result.success) {
+                                        setProgress(100);
+                                        alert('上传成功: ' + result.message);
+                                        loadSources();
+                                    } else {
+                                        alert('上传失败: ' + result.message);
+                                    }
+                                } catch (err) {
+                                    alert('上传失败: 响应解析错误');
+                                }
+                            } else {
+                                alert('上传失败: HTTP ' + xhr.status);
+                            }
+                        };
+                        xhr.onerror = function() {
+                            progressWrap.style.display = 'none';
+                            alert('上传失败: 网络错误');
+                        };
+                        // 超时控制：15s 未完成（含上传+等待响应）即提示
+                        xhr.timeout = 15000;
+                        xhr.ontimeout = function() {
+                            progressWrap.style.display = 'none';
+                            alert('上传超时，请重试');
+                        };
+                        xhr.open('POST', '/api/sources/upload');
+                        xhr.send(formData);
                     }
 
                     async function toggleSource(id, enable) {
@@ -880,6 +926,45 @@ class HttpServer(
     }
 
     /**
+     * 生成管理页访问地址二维码（ZXing 生成 PNG，供手机扫码打开管理页）
+     */
+    private fun serveQrCode(): Response {
+        return try {
+            val text = getAccessUrl()
+            if (text.isBlank()) return serveNotFound()
+            val writer = QRCodeWriter()
+            val hints = mapOf(
+                EncodeHintType.MARGIN to 1,
+                EncodeHintType.CHARACTER_SET to "UTF-8"
+            )
+            val matrix = writer.encode(text, BarcodeFormat.QR_CODE, 300, 300, hints)
+            val width = matrix.width
+            val height = matrix.height
+            val pixels = IntArray(width * height)
+            for (y in 0 until height) {
+                val offset = y * width
+                for (x in 0 until width) {
+                    pixels[offset + x] = if (matrix.get(x, y)) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+                }
+            }
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+            val baos = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, baos)
+            val bytes = baos.toByteArray()
+            newFixedLengthResponse(
+                Response.Status.OK,
+                "image/png",
+                ByteArrayInputStream(bytes),
+                bytes.size.toLong()
+            )
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+            Log.e(TAG, "生成二维码失败: ${e.message}", e)
+            serveNotFound()
+        }
+    }
+
+    /**
      * 服务静态文件
      */
     private fun serveStaticFile(uri: String): Response {
@@ -994,8 +1079,6 @@ class HttpServer(
         }
 
         override fun getName(): String = file.absolutePath
-
-        override fun length(): Long = file.length()
     }
 }
 
