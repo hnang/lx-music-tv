@@ -1907,6 +1907,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val trimmed = url.trim()
         // 去掉查询参数中的井号锚点（网易云 #/playlist?id=xxx）
         val normalized = trimmed.replace("#/", "/")
+        // 酷狗码：纯数字（5 位及以上、无 URL 结构），直接识别为酷狗歌单
+        if (Regex("""^\d{5,}$""").matches(trimmed)) {
+            return MusicPlatform.KG to trimmed
+        }
         return try {
             val uri = java.net.URI(normalized)
             val host = uri.host?.lowercase() ?: return null
@@ -1940,7 +1944,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (host.contains("kugou.com")) {
                 val pathId = Regex("""special/single/(\d+)""").find(path)?.groupValues?.get(1)
                 if (pathId != null) return MusicPlatform.KG to pathId
-                // t3.kugou.com 短链需跳转，直接返回提示不支持
+                // 酷狗 gcid 分享链接：m.kugou.com/songlist/gcid_xxx（gcid 在完整 URL 的 query 中，需在原始串上匹配）
+                val gcid = Regex("""gcid_([A-Za-z0-9]+)""").find(trimmed)?.groupValues?.get(1)
+                if (gcid != null) return MusicPlatform.KG to gcid
+                // t3.kugou.com 短链等需跳转解析，暂不支持
                 return null
             }
 

@@ -7,7 +7,10 @@ import android.util.Log
 import com.lxmusic.tv.data.model.MusicSource
 import com.lxmusic.tv.data.source.ScriptParser
 import fi.iki.elonen.NanoHTTPD
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.*
@@ -29,6 +32,13 @@ class HttpServer(
     private var sourceManager: SourceManager? = null
     private var playlistManager: PlaylistManager? = null
     private val scriptParser = ScriptParser()
+
+    init {
+        // Android 上 System.getProperty("java.io.tmpdir") 常指向不可写目录（/data/local/tmp），
+        // NanoHTTPD 默认 DefaultTempFileManager 写临时文件会失败，导致 multipart 上传（播放源 .js）解析异常。
+        // 改用应用 cacheDir 作为临时文件目录，修复 Web 端上传播放源无反应/失败的问题。
+        setTempFileManagerFactory { AndroidTempFileManager(context) }
+    }
     // 2.8 Web 端推送搜索文字回调（/api/search 收到文字后调用，主线程由调用方自行调度）
     var onSearchText: ((String) -> Unit)? = null
     // 2.8 Web 端清空搜索框回调（/api/search/clear 调用）
@@ -100,7 +110,7 @@ class HttpServer(
 
         Log.d(TAG, "收到请求: $method $uri (query: $params)")
 
-        return when {
+        val response = when {
             uri == "/" || uri == "/index.html" -> serveIndexPage()
             uri == "/api/sources" && method == Method.GET -> serveSourcesList()
             uri == "/api/sources/upload" && method == Method.POST -> handleSourceUpload(session)
@@ -122,6 +132,11 @@ class HttpServer(
             uri.startsWith("/static/") -> serveStaticFile(uri)
             else -> serveNotFound()
         }
+        // 禁用 HTTP keep-alive：NanoHTTPD 2.3.1 默认固定线程池（16 线程），浏览器 keep-alive 连接
+        // 若不及时释放会占满线程池，导致后续请求排队、页面加载慢甚至无响应（也是上传"无反应"的根源之一）。
+        // 本地管理页无连接复用需求，统一 Connection: close，每个请求处理完立即关闭连接、归还线程。
+        response.addHeader("Connection", "close")
+        return response
     }
 
     /**
@@ -412,8 +427,14 @@ class HttpServer(
                         }
                         var formData = new FormData();
                         formData.append('file', file);
+                        // 超时控制：后端异常导致连接挂起时不再无限等待，15s 未返回即提示超时
+                        var controller = new AbortController();
+                        var timeoutId = setTimeout(function() { controller.abort(); }, 15000);
                         try {
-                            var response = await fetch('/api/sources/upload', { method: 'POST', body: formData });
+                            var response = await fetch('/api/sources/upload', {
+                                method: 'POST', body: formData, signal: controller.signal
+                            });
+                            clearTimeout(timeoutId);
                             var result = await response.json();
                             if (result.success) {
                                 alert('上传成功: ' + result.message); loadSources();
@@ -421,7 +442,12 @@ class HttpServer(
                                 alert('上传失败: ' + result.message);
                             }
                         } catch (error) {
-                            alert('上传失败: ' + error.message);
+                            clearTimeout(timeoutId);
+                            if (error.name === 'AbortError') {
+                                alert('上传超时，请重试');
+                            } else {
+                                alert('上传失败: ' + error.message);
+                            }
                         }
                     }
 
@@ -927,6 +953,53 @@ class HttpServer(
         val response = mapOf("success" to false, "message" to message)
         val json = com.lxmusic.tv.util.JsonUtil.toJson(response)
         return newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", json)
+    }
+
+    /**
+     * Android 临时文件管理器：将 NanoHTTPD 的临时文件写入应用 cacheDir，
+     * 避免默认 java.io.tmpdir（/data/local/tmp）在 Android 上不可写导致 multipart 上传失败。
+     */
+    private class AndroidTempFileManager(private val context: Context) : NanoHTTPD.TempFileManager {
+        private val tmpDir: File = File(context.cacheDir, "nanohttpd-upload")
+        private val tempFiles: MutableList<NanoHTTPD.TempFile> = mutableListOf()
+
+        init {
+            if (!tmpDir.exists()) tmpDir.mkdirs()
+        }
+
+        override fun createTempFile(filenameHint: String?): NanoHTTPD.TempFile {
+            val file = File.createTempFile("NanoHTTPD-", "", tmpDir)
+            val tempFile = AndroidTempFile(file)
+            tempFiles.add(tempFile)
+            return tempFile
+        }
+
+        override fun clear() {
+            tempFiles.forEach { runCatching { it.delete() } }
+            tempFiles.clear()
+        }
+    }
+
+    /**
+     * 基于 File 的 NanoHTTPD TempFile 实现
+     */
+    private class AndroidTempFile(private val file: File) : NanoHTTPD.TempFile {
+        private var stream: FileOutputStream? = null
+
+        override fun open(): OutputStream {
+            stream = FileOutputStream(file)
+            return stream!!
+        }
+
+        override fun delete() {
+            runCatching { stream?.close() }
+            stream = null
+            if (!file.delete()) file.deleteOnExit()
+        }
+
+        override fun getName(): String = file.absolutePath
+
+        override fun length(): Long = file.length()
     }
 }
 

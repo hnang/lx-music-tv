@@ -111,6 +111,22 @@ class BrowseDataService(
             Pair("19190036", "欧美榜"),
             Pair("83176390", "国风金曲榜")
         )
+
+        // ===== 酷狗歌单导入（酷狗码/gcid/global_collection_id 链路，参考 lx-music-mobile musicSdk/kg）=====
+        // 酷狗码解析：POST t.kugou.com/command/（JSON body）
+        private const val KG_COMMAND_URL = "http://t.kugou.com/command/"
+        // gcid 解码：POST t.kugou.com/v1/songlist/batch_decode（JSON body）
+        private const val KG_DECODE_GID_URL = "https://t.kugou.com/v1/songlist/batch_decode"
+        // global_collection_id 歌单信息：GET mobiles.kugou.com/api/v5/special/info_v2（web 签名）
+        private const val KG_GLOBAL_INFO_URL = "https://mobiles.kugou.com/api/v5/special/info_v2"
+        // global_collection_id 歌曲列表：pubsongscdn.tx.kugou.com/v2/get_other_list_file（android 签名）
+        private const val KG_GLOBAL_SONGS_URL = "http://pubsongscdn.tx.kugou.com/v2/get_other_list_file"
+        // 酷狗码解析请求头（KG-RC/KG-THash，仿 lx-music-mobile getUserListDetailByCode）
+        private val KG_COMMAND_HEADERS = mapOf(
+            "KG-RC" to "1",
+            "KG-THash" to "network_super_call.cpp:3676261689:379",
+            "User-Agent" to ""
+        )
     }
 
     /**
@@ -210,7 +226,7 @@ class BrowseDataService(
                 MusicPlatform.WY -> fetchWyPlaylistSongs(id)
                 // QQ 歌单歌曲（参考 lxserver：fcg_ucc_getcdinfo_byids_cp + new_format=1，用户网络下免登录）
                 MusicPlatform.TX -> fetchQqPlaylistSongs(id)
-                MusicPlatform.KG -> fetchKgPlaylistSongs(id, page, pageSize)
+                MusicPlatform.KG -> fetchKgPlaylistSongsCompat(id, page, pageSize)
                 MusicPlatform.KW -> fetchKwPlaylistSongs(id)
                 MusicPlatform.MG -> fetchMgPlaylistSongs(id)
                 else -> emptyList()
@@ -346,19 +362,147 @@ class BrowseDataService(
     }
 
     /**
-     * 酷狗歌单详情（页面无歌单名元数据，名称兜底「酷狗歌单」，歌曲数从歌曲列表获取）
+     * 酷狗歌单详情
+     *
+     * 支持三类输入（参考 lx-music-mobile musicSdk/kg）：
+     * 1. 酷狗码（纯数字，如 40254149）：POST t.kugou.com/command/ → 得到 global_collection_id
+     * 2. gcid 链接提取的 gcid（字母数字，如 3z1a222u2z3z01c）：POST t.kugou.com/v1/songlist/batch_decode → global_collection_id
+     * 3. 已是 global_collection_id（collection_xxx）→ 直接用
+     * 得到 global_collection_id 后：GET mobiles.kugou.com/api/v5/special/info_v2 拿歌单元数据。
+     *
+     * 兜底：id 为纯数字且酷狗码链路失败时，回退 specialid 拉取（pubsongscdn specialid 接口，见 fetchKgPlaylistSongs）。
      */
     private suspend fun fetchKgPlaylistDetail(id: String): Playlist? {
-        val songs = fetchKgPlaylistSongs(id)
-        if (songs.isEmpty()) return null
-        return Playlist(
-            id = id,
-            name = "酷狗歌单 $id",
-            description = null,
-            coverUrl = songs.firstOrNull()?.picUrl,
-            songCount = songs.size,
-            platform = MusicPlatform.KG,
-            creator = null
+        // 1. 尝试酷狗码/gcid 链路
+        val gcid = resolveKgGlobalCollectionId(id)
+        if (gcid != null) {
+            val info = fetchKgGlobalPlaylistInfo(gcid)
+            if (info != null) {
+                return Playlist(
+                    id = gcid,
+                    name = info.specialname,
+                    description = info.intro?.ifBlank { null },
+                    coverUrl = info.imgurl?.replace("{size}", "1000")?.ifEmpty { null },
+                    songCount = info.songcount,
+                    platform = MusicPlatform.KG,
+                    creator = info.nickname?.ifBlank { null }
+                )
+            }
+        }
+        // 2. 回退 specialid 逻辑（仅纯数字 id）
+        if (id.all { it.isDigit() }) {
+            val songs = fetchKgPlaylistSongs(id)
+            if (songs.isNotEmpty()) {
+                return Playlist(
+                    id = id,
+                    name = "酷狗歌单 $id",
+                    description = null,
+                    coverUrl = songs.firstOrNull()?.picUrl,
+                    songCount = songs.size,
+                    platform = MusicPlatform.KG,
+                    creator = null
+                )
+            }
+        }
+        return null
+    }
+
+    /**
+     * 解析酷狗 id → global_collection_id
+     * - 酷狗码（纯数字）→ POST t.kugou.com/command/
+     * - gcid → POST t.kugou.com/v1/songlist/batch_decode
+     * - 已是 collection_ 开头 → 直接返回
+     * 失败返回 null（调用方回退 specialid）。
+     */
+    private suspend fun resolveKgGlobalCollectionId(id: String): String? {
+        return when {
+            id.startsWith("collection_") -> id
+            id.all { it.isDigit() } -> {
+                // 酷狗码：POST t.kugou.com/command/
+                val body = JSONObject().apply {
+                    put("appid", 1001)
+                    put("clientver", 9020)
+                    put("mid", "21511157a05844bd085308bc76ef3343")
+                    put("clienttime", 640612895)
+                    put("key", "36164c4015e704673c588ee202b9ecb8")
+                    put("data", id)
+                }.toString()
+                val resp = httpClient.post(
+                    KG_COMMAND_URL,
+                    body = body,
+                    contentType = "application/json",
+                    headers = KG_COMMAND_HEADERS
+                )
+                if (!resp.isSuccess) return null
+                val json = try { JSONObject(resp.body) } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) { return null }
+                val info = json.optJSONObject("data")?.optJSONObject("info") ?: return null
+                info.optString("global_collection_id", "").ifEmpty { null }
+            }
+            else -> {
+                // gcid：POST t.kugou.com/v1/songlist/batch_decode
+                val params = mapOf(
+                    "dfid" to "-", "appid" to "1005", "mid" to "0",
+                    "clientver" to "20109", "clienttime" to "640612895", "uuid" to "-"
+                )
+                val body = JSONObject().apply {
+                    put("ret_info", 1)
+                    put("data", JSONArray().put(JSONObject().apply {
+                        put("id", id); put("id_type", 2)
+                    }))
+                }.toString()
+                val signature = kgSignAndroid(params, body)
+                val query = params.entries.joinToString("&") { "${it.key}=${it.value}" } + "&signature=$signature"
+                val resp = httpClient.post(
+                    "$KG_DECODE_GID_URL?$query",
+                    body = body,
+                    contentType = "application/json",
+                    headers = mapOf(
+                        "User-Agent" to "Mozilla/5.0 (Linux; Android 10; HUAWEI HMA-AL00) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36",
+                        "Referer" to "https://m.kugou.com/"
+                    )
+                )
+                if (!resp.isSuccess) return null
+                val json = try { JSONObject(resp.body) } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) { return null }
+                json.optJSONObject("data")?.optJSONArray("list")
+                    ?.optJSONObject(0)?.optString("global_collection_id", "")?.ifEmpty { null }
+            }
+        }
+    }
+
+    /**
+     * 酷狗 global_collection_id 歌单信息（mobiles.kugou.com/api/v5/special/info_v2，web 签名）
+     */
+    private suspend fun fetchKgGlobalPlaylistInfo(gcid: String): KgGlobalInfo? {
+        val params = mapOf(
+            "appid" to "1058", "specialid" to "0", "global_specialid" to gcid,
+            "format" to "jsonp", "srcappid" to "2919", "clientver" to "20000",
+            "clienttime" to "1586163242519", "mid" to "1586163242519",
+            "uuid" to "1586163242519", "dfid" to "-"
+        )
+        // kgSign 即 web 密钥签名（NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt）
+        val signature = kgSign(params)
+        val query = params.entries.joinToString("&") { "${it.key}=${it.value}" } + "&signature=$signature"
+        val resp = httpClient.get(
+            "$KG_GLOBAL_INFO_URL?$query",
+            headers = mapOf(
+                "mid" to "1586163242519",
+                "Referer" to "https://m3ws.kugou.com/share/index.php",
+                "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 11_0 like Mac OS X) AppleWebKit/604.1.38 (KHTML, like Gecko) Version/11.0 Mobile/15A372 Safari/604.1",
+                "dfid" to "-",
+                "clienttime" to "1586163242519"
+            )
+        )
+        if (!resp.isSuccess) return null
+        val json = try { JSONObject(resp.body) } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) { return null }
+        val data = json.optJSONObject("data") ?: return null
+        val name = data.optString("specialname", "")
+        if (name.isBlank()) return null
+        return KgGlobalInfo(
+            specialname = name,
+            imgurl = data.optString("imgurl", ""),
+            songcount = data.optInt("songcount", 0),
+            nickname = data.optString("nickname", ""),
+            intro = data.optString("intro", "")
         )
     }
 
@@ -1166,6 +1310,19 @@ class BrowseDataService(
      * 返回 data.info 歌曲数组（扁平字段含 hash/name/singerinfo/album_id/timelen/cover）、data.count=总数。
      * 兜底：原 www.kugou.com/yy/special/single/{id}.html 内嵌 var data=[...]（仅首屏 ~30 首、无分页）。
      */
+    /**
+     * 酷狗歌单歌曲兼容入口：按 id 类型选择接口。
+     * - collection_ 开头（gcid/global_collection_id，来自酷狗码/gcid 链接导入）→ global_collection_id 接口
+     * - 纯数字（specialid）→ 原有 specialid 接口
+     */
+    private suspend fun fetchKgPlaylistSongsCompat(id: String, page: Int = 1, pageSize: Int = 30): List<Song> {
+        return if (id.startsWith("collection_")) {
+            fetchKgGlobalPlaylistSongs(id, page, pageSize)
+        } else {
+            fetchKgPlaylistSongs(id, page, pageSize)
+        }
+    }
+
     private suspend fun fetchKgPlaylistSongs(specialId: String, page: Int = 1, pageSize: Int = 30): List<Song> {
         val params = mapOf(
             "srcappid" to "2919",
@@ -1203,6 +1360,26 @@ class BrowseDataService(
     }
 
     /**
+     * 酷狗 global_collection_id 歌单歌曲（pubsongscdn.tx.kugou.com/v2/get_other_list_file，android 签名）
+     * 参考 lx-music-mobile musicSdk/kg getSongListDetailByGlobalSpecialId。
+     */
+    private suspend fun fetchKgGlobalPlaylistSongs(gcid: String, page: Int = 1, pageSize: Int = 30): List<Song> {
+        val params = mapOf(
+            "specialid" to "0", "need_sort" to "1", "module" to "CloudMusic",
+            "clientver" to "11409", "pagesize" to pageSize.toString(),
+            "global_collection_id" to gcid, "userid" to "0", "page" to page.toString(),
+            "type" to "1", "area_code" to "1", "appid" to "1005"
+        )
+        val signature = kgSignAndroid(params)
+        val query = params.entries.joinToString("&") { "${it.key}=${it.value}" } + "&signature=$signature"
+        val resp = httpClient.get("$KG_GLOBAL_SONGS_URL?$query")
+        if (!resp.isSuccess) return emptyList()
+        val json = try { JSONObject(resp.body) } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) { return emptyList() }
+        val list = json.optJSONObject("data")?.optJSONArray("info") ?: return emptyList()
+        return parseKgPlaylistSongs(list)
+    }
+
+    /**
      * 酷狗歌单歌曲兜底（www.kugou.com/yy/special/single/{specialid}.html 页面内嵌 var data=[...] JSON）。
      * 仅首屏内嵌约 30 首，后续靠页面 JS 异步加载，无法翻页（主接口才是分页方案）。
      */
@@ -1225,6 +1402,18 @@ class BrowseDataService(
         val concat = params.toSortedMap().entries.joinToString("") { "${it.key}=${it.value}" }
         val md = MessageDigest.getInstance("MD5")
         val bytes = md.digest((key + concat + key).toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 酷狗 android 密钥签名（可带 body）：key + 排序参数(key=value 无分隔) + body + key，MD5。
+     * 用于 t.kugou.com/v1/songlist/batch_decode（gcid 解码，需带 body）。
+     */
+    private fun kgSignAndroid(params: Map<String, String>, body: String = ""): String {
+        val key = "OIlwieks28dk2k092lksi2UIkp"
+        val concat = params.toSortedMap().entries.joinToString("") { "${it.key}=${it.value}" }
+        val md = MessageDigest.getInstance("MD5")
+        val bytes = md.digest((key + concat + body + key).toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
     }
 
@@ -1694,3 +1883,14 @@ class BrowseDataService(
         }
     }
 }
+
+/**
+ * 酷狗 global_collection_id 歌单信息（mobiles.kugou.com/api/v5/special/info_v2 返回）
+ */
+private data class KgGlobalInfo(
+    val specialname: String,
+    val imgurl: String,
+    val songcount: Int,
+    val nickname: String,
+    val intro: String
+)
