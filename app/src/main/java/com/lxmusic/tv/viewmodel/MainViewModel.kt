@@ -47,6 +47,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val SEARCH_HISTORY_MAX = 10
         // 2.9 播放失败尝试切换平台开关（lx_settings；设置-播放源管理页切换，MainActivity/本类共用）
         const val KEY_PLATFORM_SWITCH = "play_platform_switch_enabled"
+        // 2.9 连续播放失败上限：连续多首完全拿不到播放地址时停止自动跳曲，
+        // 避免「没有可用音源/音源全部失效」时在歌单里无限自动换歌，用户来不及点暂停
+        private const val MAX_CONSECUTIVE_PLAY_FAILURES = 3
     }
 
     private val app = application as LXMusicApplication
@@ -222,6 +225,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 2.8 播放失败标记：失败后「播放/暂停」恢复播放时需重新解析 URL（坏 URL/换源场景），
     // 否则 resume 旧 MediaItem 仍会失败；playSong 成功启动时重置
     private var playNeedsReFetch = false
+    // 2.9 连续播放失败计数：连续多首拿不到播放地址时停止自动跳曲（用户主动播放/播放成功时归零），
+    // 避免无可用音源时在歌单里无限自动换歌
+    private var consecutivePlayFailures = 0
+    // 2.9 待执行的自动跳曲：失败后 5 秒等待期间为 true；用户点播放/暂停或手动切歌会取消
+    private var pendingAutoSkip = false
+    // 2.9 自动跳曲代次：每次进入/取消等待都递增；旧等待协程据此判断自己是否已失效，
+    // 避免快速切歌时上一个协程误清除新歌曲的等待标记
+    private var autoSkipGeneration = 0
 
     // ========== 2.9 本地离线缓存歌曲（侧栏「本地」Tab） ==========
     // 展示应用边播边缓存下来的完整离线歌曲；列表由 CacheManager 扫描 SimpleCache 得到
@@ -1470,8 +1481,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 播放歌曲
      */
-    fun playSong(song: Song, playlist: List<Song> = emptyList()) {
+    fun playSong(song: Song, playlist: List<Song> = emptyList(), autoSkip: Boolean = false) {
         viewModelScope.launch {
+            // 2.9 用户主动播放/手动切歌（autoSkip=false）：重置连续失败计数，给用户重新尝试的机会；
+            // 自动跳曲（autoSkip=true）不清零，连续失败达到上限后由 doResolveAndPlay 停止自动切换
+            if (!autoSkip) {
+                consecutivePlayFailures = 0
+            }
+            // 新一轮播放开始：取消可能残留的自动跳曲等待（递增代次使旧等待协程失效）
+            pendingAutoSkip = false
+            autoSkipGeneration++
             // 2.8 用户主动选歌：清空本轮失败源（新一次播放按设置顺序从最高优先级源重新尝试，
             // 上次失败的源可能已恢复）
             tryFailedSourceIds.clear()
@@ -1588,6 +1607,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ApiResponse.error("获取播放URL异常: ${e.message}")
         }
         if (urlResult.success && urlResult.data != null) {
+            // 2.9 播放成功：连续失败计数归零、清除待跳曲标记（自动跳曲循环被正常播放打断）
+            consecutivePlayFailures = 0
+            pendingAutoSkip = false
+            autoSkipGeneration++
             // 记录 URL 来源源 id：播放失败时加入黑名单，重试跳过该源
             currentPlaySourceId = urlResult.data.sourceId
             playNeedsReFetch = false
@@ -1633,17 +1656,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val failTail = lastFailedSource?.let { "「$it」播放失败" }
             ?: "播放失败：所有播放源均无法获取有效播放地址"
         _isPlaying.value = false
-        playNeedsReFetch = false
+        // 2.9 失败后允许用户点「播放」重新解析当前歌曲（而不是 resume 空播放器）
+        playNeedsReFetch = true
+        // 2.9 连续失败计数 +1，并做两级保护，避免无可用音源时无限自动换歌
+        consecutivePlayFailures++
+
+        // ① 当前平台没有任何可用音源（未添加/未启用/平台配置都排除了）：直接停住并提示，不自动跳曲
+        val hasAvailableSource = try {
+            sourceManager.getSourcesForPlatform(song.platform.key).isNotEmpty()
+        } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+            true
+        }
+        if (!hasAvailableSource) {
+            pendingAutoSkip = false
+            autoSkipGeneration++
+            Log.w("LX-MainViewModel", "当前平台没有可用的音源，停止自动跳曲: ${song.name} platform=${song.platform.key}")
+            _toastMessage.value = "当前平台没有可用的音源，请检查音源是否启用及平台配置"
+            return false
+        }
+
+        // ② 连续多首播放失败（音源全部失效/网络异常）：停止自动跳曲，把控制权交还用户
+        if (consecutivePlayFailures >= MAX_CONSECUTIVE_PLAY_FAILURES) {
+            pendingAutoSkip = false
+            autoSkipGeneration++
+            Log.w("LX-MainViewModel", "连续 $consecutivePlayFailures 首播放失败，停止自动跳曲")
+            _toastMessage.value = "连续 ${consecutivePlayFailures} 首播放失败，已停止自动切换，请检查音源或网络"
+            return false
+        }
+
         if (nextSong != null) {
-            _toastMessage.value = "$failTail，5秒后播放下一曲"
-            // 5 秒后自动跳到下一曲；期间用户手动切歌/停止则取消自动跳曲（以用户操作为准）
+            // 2.9 5 秒等待期间用户点播放/暂停、手动切歌都会取消自动跳曲；
+            // 用代次令牌保证旧歌曲的等待协程不会误清除新歌曲的等待标记
+            val generation = ++autoSkipGeneration
+            pendingAutoSkip = true
+            _toastMessage.value = "$failTail，5秒后播放下一曲（点暂停可停止）"
             delay(5000)
-            if (_currentSong.value?.id == song.id) {
-                playSong(nextSong, playlist)
+            val stillWaiting = pendingAutoSkip && autoSkipGeneration == generation
+            if (stillWaiting) pendingAutoSkip = false
+            val cancelled = !stillWaiting || _currentSong.value?.id != song.id
+            if (cancelled) {
+                Log.d("LX-MainViewModel", "用户已操作，取消自动跳曲")
             } else {
-                Log.d("LX-MainViewModel", "5秒内用户已切换歌曲，取消自动跳曲")
+                playSong(nextSong, playlist, autoSkip = true)
             }
         } else {
+            pendingAutoSkip = false
+            autoSkipGeneration++
             _toastMessage.value = failTail
         }
         return false
@@ -1672,25 +1730,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_isPlaying.value) {
             playerService?.pause()
             _isPlaying.value = false
-        } else {
-            val song = _currentSong.value
-            if (song != null && playNeedsReFetch) {
-                // 2.8 上次播放失败（坏 URL/换源后未重新解析）：点播放 = 用户主动发起新一轮播放，
-                // 清空本轮失败源，重新按设置顺序从头尝试（上次失败的源可能已恢复）
-                Log.w("LX-MainViewModel", "播放失败过，点击播放 → 重新按顺序解析 URL: ${song.name}")
-                playNeedsReFetch = false
-                tryFailedSourceIds.clear()
-                currentPlaySourceId = null
-                viewModelScope.launch {
-                    playerService?.stop()
-                    _progress.value = 0f
-                    _duration.value = 0L
-                    doResolveAndPlay(song, _playlist.value, _preferredQuality.value)
-                }
-            } else {
-                playerService?.resume()
-                _isPlaying.value = true
+            return
+        }
+        // 2.9 失败后「5 秒自动跳下一曲」等待期间：用户按播放/暂停 = 用户接管，
+        // 立即取消自动跳曲并停在当前歌（先不重试，避免一按就又解析失败、又进入等待）
+        if (pendingAutoSkip) {
+            pendingAutoSkip = false
+            autoSkipGeneration++
+            Log.d("LX-MainViewModel", "用户按下播放/暂停，已取消自动跳曲并停止")
+            _toastMessage.value = "已停止自动切换，点播放可重试当前歌曲"
+            return
+        }
+        val song = _currentSong.value
+        if (song != null && playNeedsReFetch) {
+            // 2.8 上次播放失败（坏 URL/换源后未重新解析）：点播放 = 用户主动发起新一轮播放，
+            // 清空本轮失败源，重新按设置顺序从头尝试（上次失败的源可能已恢复）
+            // 2.9 用户主动重试：连续失败计数归零，避免一次系统性问题就一直卡在「已停止自动切换」
+            Log.w("LX-MainViewModel", "播放失败过，点击播放 → 重新按顺序解析 URL: ${song.name}")
+            playNeedsReFetch = false
+            consecutivePlayFailures = 0
+            tryFailedSourceIds.clear()
+            currentPlaySourceId = null
+            viewModelScope.launch {
+                playerService?.stop()
+                _progress.value = 0f
+                _duration.value = 0L
+                doResolveAndPlay(song, _playlist.value, _preferredQuality.value)
             }
+        } else {
+            playerService?.resume()
+            _isPlaying.value = true
         }
     }
 

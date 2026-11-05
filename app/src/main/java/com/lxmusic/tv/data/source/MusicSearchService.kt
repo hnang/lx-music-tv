@@ -462,18 +462,27 @@ class MusicSearchService(
                 sourceId = source.id,
                 // 2.8 传歌名/歌手：JS 源按歌名搜索需要（缺失报「没歌名搜不了」）
                 songName = song.name,
-                singer = song.singer
+                singer = song.singer,
+                // 2.9 对齐 mobile toOldMusicInfo：补全专辑/时长/封面/可用音质，
+                // 脚本据此选择正确音质与平台请求参数（TV 之前缺这些字段导致大量歌解析失败）
+                albumName = song.albumName ?: "",
+                albumId = song.albumId ?: "",
+                durationMs = song.duration,
+                songQualitys = song.quality,
+                picUrl = song.picUrl ?: ""
             )
             when (result) {
                 is SourceExecutionResult.UrlSuccess -> {
                     if (result.url.isNotEmpty()) {
+                        // 2.9 实际返回音质（降级后的），用于 UI 显示与缓存标识
+                        val actualQuality = result.quality ?: quality
                         // 2.8 解析成功写入 URL 缓存（下次直接命中，断网可离线播放）
                         try {
                             CacheManager.putUrl(urlCacheKey, result.url)
                         } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
                             Log.w(TAG, "写入 URL 缓存失败: ${e.message}")
                         }
-                        return MusicPlayResult(result.url, quality, source.id)
+                        return MusicPlayResult(result.url, actualQuality, source.id)
                     }
                     // 2.8 空 URL 视为失败（原来静默跳过，无提示且少试一个源）
                     Log.w(TAG, "JS源[${source.name}]返回空URL")
@@ -535,16 +544,24 @@ class MusicSearchService(
                 sourceId = source.id,
                 // 2.9 歌曲信息透传（JS 源按歌名搜索需要；换源版本歌手一般与原歌一致）
                 songName = song.name,
-                singer = song.singer
+                singer = song.singer,
+                // 2.9 对齐 mobile：专辑/时长/封面/可用音质
+                albumName = song.albumName ?: "",
+                albumId = song.albumId ?: "",
+                durationMs = song.duration,
+                songQualitys = song.quality,
+                picUrl = song.picUrl ?: ""
             )
             if (result is SourceExecutionResult.UrlSuccess && result.url.isNotEmpty()) {
                 Log.i(TAG, "JS源[${source.name}]切换平台到${platform.displayName}成功: ${song.name}（原平台${song.platform.displayName}）")
                 // URL 缓存写原歌曲 key（缓存锚定歌曲身份，平台切换不分裂缓存；下次直接命中，不再反复解析）
                 try {
                     CacheManager.putUrl(CacheManager.songCacheKey(song, quality), result.url)
-                } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+                } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
                     Log.w(TAG, "写入换源 URL 缓存失败: ${e.message}")
                 }
+                return MusicPlayResult(result.url, result.quality ?: quality, source.id, actualPlatformKey = platform.key)
+            }
                 return MusicPlayResult(result.url, quality, source.id, actualPlatformKey = platform.key)
             }
             Log.w(TAG, "JS源[${source.name}]切换平台到${platform.displayName}失败: ${song.name}")

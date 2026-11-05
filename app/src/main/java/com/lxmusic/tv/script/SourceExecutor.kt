@@ -55,6 +55,10 @@ class SourceExecutor(
             Log.i(TAG, "===== 初始化播放源 =====")
             Log.i(TAG, "脚本长度: ${scriptContent.length}")
 
+            // 2.9 切换播放源时清空上一个源解析出的平台/音质信息，
+            // 避免音质降级读到旧源在 inited 中声明的 qualitys
+            sourceInfoFromInit.clear()
+
             // 执行脚本
             Log.i(TAG, "执行脚本...")
             val result = javaScriptEngine.executeScript(scriptContent)
@@ -211,13 +215,22 @@ class SourceExecutor(
         source: String = "kw",
         // 2.8 歌曲信息：JS 源（尤其按歌名搜索的源）需要 name/singer，缺失报「没歌名搜不了」
         songName: String = "",
-        singer: String = ""
+        singer: String = "",
+        // 2.9 对齐 mobile toOldMusicInfo：补全脚本依赖的歌曲字段，并按可用音质降级
+        albumName: String = "",
+        albumId: String = "",
+        durationMs: Long? = null,
+        songQualitys: List<AudioQuality> = emptyList(),
+        picUrl: String = ""
     ): SourceExecutionResult = withContext(Dispatchers.IO) {
         try {
             Log.i(TAG, "获取播放URL: musicId=$musicId, quality=${quality.key}")
 
             if (useEventDrivenModel) {
-                return@withContext dispatchMusicUrlRequest(musicId, quality, source, songName, singer)
+                return@withContext dispatchMusicUrlRequest(
+                    musicId, quality, source, songName, singer,
+                    albumName, albumId, durationMs, songQualitys, picUrl
+                )
             }
 
             // 传统函数模式
@@ -262,32 +275,79 @@ class SourceExecutor(
         quality: AudioQuality,
         source: String = "kw",
         songName: String = "",
-        singer: String = ""
+        singer: String = "",
+        albumName: String = "",
+        albumId: String = "",
+        durationMs: Long? = null,
+        songQualitys: List<AudioQuality> = emptyList(),
+        picUrl: String = ""
     ): SourceExecutionResult = withContext(Dispatchers.IO) {
         try {
+            // 2.9 实际请求音质：按「歌曲可用音质 ∩ 源支持音质」从偏好音质向下降级。
+            // 对齐 mobile getPlayQuality——TV 之前固定传偏好音质（默认 flac），
+            // 歌曲本身没有无损时脚本请求必然失败，表现为大量歌曲「播放失败」。
+            val actualQuality = resolveActualQuality(quality, songQualitys, source)
             Log.i(TAG, "[dispatchMusicUrlRequest] 开始派发 musicUrl 请求")
             Log.i(TAG, "  musicId: $musicId")
-            Log.i(TAG, "  quality: ${quality.key}")
+            Log.i(TAG, "  quality: ${quality.key} -> 实际 ${actualQuality.key}")
             Log.i(TAG, "  source: $source")
-            Log.i(TAG, "  songName: $songName, singer: $singer")
+            Log.i(TAG, "  songName: $songName, singer: $singer, albumName: $albumName, albumId: $albumId")
 
-            // 构造 musicInfo 对象
-            // 参考 lx-music-desktop: info.musicInfo 包含 songmid, hash 等字段
-            // 注意: musicId 可能是拼接格式（QQ: songMid_mediaMid, 酷狗: hash_albumId），
-            // 而 JS 源只需要纯 ID（songmid/hash），必须拆分，否则请求拼接串会失败
-            val pureId = musicId.substringBefore("_")
+            // 构造 musicInfo 对象（对齐 lx-music-mobile toOldMusicInfo 的完整字段）
+            // musicId 可能是拼接格式（QQ: songMid_mediaMid, 酷狗: hash_albumId），
+            // JS 源只需要纯 ID（songmid/hash），必须拆分；其他平台 id 原样传递
+            // （酷我/咪咕等 id 本身可能含下划线，不能盲目 substringBefore）
+            val pureId: String
+            val mediaMid: String
+            when (source) {
+                "tx" -> {
+                    pureId = musicId.substringBefore("_")
+                    mediaMid = musicId.substringAfter("_", "")
+                }
+                "kg" -> {
+                    pureId = musicId.substringBefore("_")
+                    mediaMid = ""
+                }
+                else -> {
+                    pureId = musicId
+                    mediaMid = ""
+                }
+            }
             val eventData = JSONObject().apply {
                 put("source", source)
                 put("action", "musicUrl")
                 put("info", JSONObject().apply {
-                    put("type", quality.key)
+                    put("type", actualQuality.key)
                     put("musicInfo", JSONObject().apply {
+                        put("name", songName)
+                        put("singer", singer)
+                        put("source", source)
                         put("songmid", pureId)
-                        put("hash", pureId)
-                        // 2.8 补歌曲信息：部分源（如听音音源）按歌名搜索，缺失报「没歌名搜不了」
-                        if (songName.isNotEmpty()) put("name", songName)
-                        if (singer.isNotEmpty()) put("singer", singer)
-                        put("albumName", "")
+                        // 时长格式与 mobile 一致：mm:ss
+                        put("interval", formatInterval(durationMs))
+                        put("albumName", albumName)
+                        put("img", picUrl)
+                        put("typeUrl", JSONObject())
+                        put("albumId", albumId)
+                        // 歌曲可用音质：mobile toOldMusicInfo 会带 types/_types，部分音源据此选音质
+                        put("types", org.json.JSONArray().apply {
+                            songQualitys.forEach { q -> put(JSONObject().put("type", q.key)) }
+                        })
+                        put("_types", JSONObject().apply {
+                            songQualitys.forEach { q -> put(q.key, JSONObject()) }
+                        })
+                        when (source) {
+                            "kg" -> {
+                                // 酷狗：hash 为纯 ID；albumId 上面已带
+                                put("hash", pureId)
+                            }
+                            "tx" -> {
+                                // QQ：songmid/strMediaMid/albumMid 三者缺一不可
+                                put("strMediaMid", mediaMid)
+                                put("albumMid", albumId)
+                                put("songId", pureId)
+                            }
+                        }
                     })
                 })
             }
@@ -302,7 +362,7 @@ class SourceExecutor(
                     val url = result.resultString
                     Log.i(TAG, "[dispatchMusicUrlRequest] ★ 获取到播放URL: $url")
                     if (url.isNotBlank() && url != "undefined" && url != "null") {
-                        SourceExecutionResult.UrlSuccess(url)
+                        SourceExecutionResult.UrlSuccess(url, actualQuality)
                     } else {
                         SourceExecutionResult.Error("获取播放URL失败: 返回空URL")
                     }
@@ -312,10 +372,75 @@ class SourceExecutor(
                     SourceExecutionResult.Error("获取播放URL失败: ${result.message}")
                 }
             }
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+        } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
             Log.e(TAG, "[dispatchMusicUrlRequest] 异常", e)
             SourceExecutionResult.Error("获取播放URL时出错: ${e.message}")
         }
+    }
+
+    /**
+     * 2.9 实际请求音质（对齐 mobile getPlayQuality）：
+     * 取「歌曲可用音质 ∩ 源在 inited 中声明的音质」中，从偏好音质向下的第一个可用项。
+     * 两边信息缺失时不限制；全部不匹配则维持原请求音质（保持旧行为）。
+     */
+    private fun resolveActualQuality(
+        requested: AudioQuality,
+        songQualitys: List<AudioQuality>,
+        sourceKey: String
+    ): AudioQuality {
+        val sourceSupported: Set<AudioQuality> = try {
+            val info = sourceInfoFromInit[sourceKey]
+            val obj: JSONObject? = when (info) {
+                is JSONObject -> info
+                is String -> JSONObject(info)
+                else -> null
+            }
+            val arr = obj?.optJSONArray("qualitys")
+            if (arr == null) {
+                emptySet()
+            } else {
+                (0 until arr.length()).mapNotNull { i ->
+                    AudioQuality.entries.firstOrNull { it.key == arr.optString(i) }
+                }.toSet()
+            }
+        } catch (e: Exception) {
+            emptySet()
+        }
+        return fallbackQuality(requested, songQualitys, sourceSupported)
+    }
+
+    private fun fallbackQuality(
+        requested: AudioQuality,
+        songQualitys: List<AudioQuality>,
+        sourceSupported: Set<AudioQuality>
+    ): AudioQuality {
+        val songSet = songQualitys.toSet()
+        // 2.9 歌曲音质信息缺失（歌单解析等场景 Song.quality 为空）时，保守从 320k 起，
+        // 避免对本来没有无损的歌曲盲目请求 flac 导致整首解析失败（可播性优先）
+        val effectiveRequested = if (songSet.isEmpty() &&
+            (requested == AudioQuality.FLAC || requested == AudioQuality.FLAC_24BIT)
+        ) {
+            AudioQuality.QUALITY_320K
+        } else {
+            requested
+        }
+        val order = when (effectiveRequested) {
+            AudioQuality.FLAC_24BIT -> listOf(AudioQuality.FLAC_24BIT, AudioQuality.FLAC, AudioQuality.QUALITY_320K, AudioQuality.QUALITY_128K)
+            AudioQuality.FLAC -> listOf(AudioQuality.FLAC, AudioQuality.QUALITY_320K, AudioQuality.QUALITY_128K)
+            AudioQuality.QUALITY_320K -> listOf(AudioQuality.QUALITY_320K, AudioQuality.QUALITY_128K)
+            AudioQuality.QUALITY_128K -> listOf(AudioQuality.QUALITY_128K)
+        }
+        return order.firstOrNull { q ->
+            (songSet.isEmpty() || songSet.contains(q)) &&
+                (sourceSupported.isEmpty() || sourceSupported.contains(q))
+        } ?: effectiveRequested
+    }
+
+    /** 毫秒时长 → mobile 同款 mm:ss 字符串（缺失返回空串） */
+    private fun formatInterval(durationMs: Long?): String {
+        if (durationMs == null || durationMs <= 0) return ""
+        val totalSec = durationMs / 1000
+        return "%02d:%02d".format(totalSec / 60, totalSec % 60)
     }
 
     /**
@@ -444,7 +569,7 @@ sealed class SourceExecutionResult {
     data class Success(val message: String) : SourceExecutionResult()
     data class Error(val message: String) : SourceExecutionResult()
     data class SearchSuccess(val musicList: List<MusicItem>) : SourceExecutionResult()
-    data class UrlSuccess(val url: String) : SourceExecutionResult()
+    data class UrlSuccess(val url: String, val quality: AudioQuality? = null) : SourceExecutionResult()
     data class LyricSuccess(val lyric: String) : SourceExecutionResult()
     data class PicSuccess(val picUrl: String) : SourceExecutionResult()
 }
