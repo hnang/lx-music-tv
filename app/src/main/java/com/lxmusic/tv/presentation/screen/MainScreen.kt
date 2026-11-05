@@ -57,6 +57,7 @@ import android.os.Build
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lxmusic.tv.data.cache.CacheManager
@@ -1390,15 +1391,28 @@ fun BrowsePage(
                 // 网格外套一个非焦点容器（不调用 focusable，避免成为焦点停靠点）；
                 // 网格不再自动抢焦：初始/切 tab 时焦点停在左侧导航栏，遥控器右键由 Compose 默认
                 // 空间遍历自然进入网格第一项，符合「按右再进入内容」的使用习惯
-                Box(
+                BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
                 ) {
+                    // 2.9 竖屏/窄屏自适应列数：按可用宽度每列至少约 170dp 计算，限制 2~5 列。
+                    // 之前固定 5 列：手机竖屏下每列仅几十 dp，封面又是固定 135dp 高 → 卡片又细又高；
+                    // 电视宽屏（内容区 ≥850dp）仍为 5 列，原有大屏观感不变。
+                    val gridSpacing = 14.dp
+                    val gridColumns = remember(maxWidth) {
+                        (maxWidth.value / 170f).toInt().coerceIn(2, 5)
+                    }
+                    // 封面高度随列宽收缩：列宽 > 135dp 时保持电视原观感（135dp），
+                    // 窄列（手机竖屏 2~3 列）时与列宽一致，避免封面高度远大于宽度的「窄高条」
+                    val cardCoverHeight = remember(maxWidth, gridColumns) {
+                        val cardWidth = (maxWidth - gridSpacing * (gridColumns - 1)) / gridColumns
+                        if (cardWidth < 135.dp) cardWidth else 135.dp
+                    }
                     LazyVerticalGrid(
-                        // 5 列（2.6）：比 4 列时卡片更小，电视上能完整显示更多行
-                        columns = GridCells.Fixed(5),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        // 列数自适应（2.9）：宽屏 5 列（2.6），竖屏/手机 2~3 列
+                        columns = GridCells.Fixed(gridColumns),
+                        verticalArrangement = Arrangement.spacedBy(gridSpacing),
+                        horizontalArrangement = Arrangement.spacedBy(gridSpacing),
                         state = gridState,
                         // 快速方向键滚动的掉帧问题已由 RemoteImage 的并发解码信号量(Semaphore=2)
                         // 与更小的解码尺寸(maxDimension=512/256)解决，故此处不依赖 beyondBoundsItemCount
@@ -1412,6 +1426,7 @@ fun BrowsePage(
                             BrowseCard(
                                 item = item,
                                 index = index,
+                                coverHeight = cardCoverHeight,
                                 onClick = {
                                     // 2.8 记录进入详情前的位置（返回时聚焦回这张卡片）
                                     hasOpenedDetail = true
@@ -1421,7 +1436,7 @@ fun BrowsePage(
                                 // 列表首项承载「右键进入」焦点请求器；首列卡片拦截左键返回选中 tab
                                 contentEnterRequester = if (index == firstVisibleCardIndex) contentEnterRequester else null,
                                 onExitToNav = onExitToNav,
-                                interceptLeftExit = index % 5 == 0,
+                                interceptLeftExit = index % gridColumns == 0,
                                 onCardFocused = { idx -> focusedCardIndex = idx },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1547,6 +1562,8 @@ fun BrowsePage(
 @Composable
 fun BrowseCard(
     item: BrowseItem,
+    // 2.9 封面高度：宽屏固定 135dp（电视原观感），窄列时随列宽收缩（竖屏/手机适配）
+    coverHeight: Dp = 135.dp,
     onClick: () -> Unit,
     contentEnterRequester: FocusRequester? = null,
     onExitToNav: (() -> Unit)? = null,
@@ -1581,12 +1598,12 @@ fun BrowseCard(
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            // 封面：固定高度（不再强制 1:1 正方形），缩小卡片垂直占用，
-            // 保证电视上网格能完整显示多行卡片（2.6 实测 135dp 最合适，歌单/排行共用本卡片）
+            // 封面：高度自适应（2.9 传参，宽屏 135dp；窄屏随列宽收缩，避免竖屏「又细又高」），
+            // 缩小卡片垂直占用，保证电视上网格能完整显示多行卡片（2.6 实测 135dp 最合适，歌单/排行共用本卡片）
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(135.dp)
+                    .height(coverHeight)
                     .clip(RoundedCornerShape(8.dp))
             ) {
                 if (!item.coverUrl.isNullOrBlank()) {

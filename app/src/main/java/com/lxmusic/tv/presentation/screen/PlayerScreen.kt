@@ -38,6 +38,7 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -46,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.AnimatedVisibility
@@ -435,73 +437,140 @@ private fun PlayerMainContent(
     focusRequester: FocusRequester,
     modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 48.dp)
-            .focusRequester(focusRequester)
-            .focusable(),
-        horizontalArrangement = Arrangement.spacedBy(48.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 左侧：封面 + 歌名 + 歌手（垂直居中堆叠）
-        Column(
-            modifier = Modifier.weight(0.42f),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            GlassAlbumCover(
-                currentSong = currentSong,
-                modifier = Modifier.fillMaxWidth(0.78f).aspectRatio(1f)
-            )
-            Spacer(modifier = Modifier.height(22.dp))
-            Text(
-                text = currentSong?.name ?: "未在播放",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = currentSong?.singer ?: "选择一首歌开始播放",
-                fontSize = 15.sp,
-                color = Color.White.copy(alpha = 0.65f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center
-            )
-            // 2.8 歌手下方显示当前真实播放音质（ExoPlayer 解析；解析前/未知格式显示「未知」）
-            if (currentSong != null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = currentPlayQuality?.let {
-                        when (it) {
-                            AudioQuality.QUALITY_128K -> "标准 128K"
-                            AudioQuality.QUALITY_320K -> "高品质 320K"
-                            AudioQuality.FLAC -> "无损 flac"
-                            AudioQuality.FLAC_24BIT -> "Hi-Res flac24bit"
-                        }
-                    } ?: "未知",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White.copy(alpha = 0.5f),
-                    letterSpacing = 2.sp,
-                    maxLines = 1,
-                    textAlign = TextAlign.Center
+    // 2.9 竖屏/窄屏适配：宽度 < 600dp（手机竖屏）改为「上封面+下歌词」上下布局并收紧边距，
+    // 电视宽屏保留原「左封面+右歌词」左右布局不变
+    BoxWithConstraints(modifier = modifier) {
+        val isNarrow = maxWidth < 600.dp
+        if (isNarrow) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp)
+                    .focusRequester(focusRequester)
+                    .focusable(),
+                verticalArrangement = Arrangement.Center
+            ) {
+                // 上：封面 + 歌名信息（约 45% 高度）
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.45f),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    GlassAlbumCover(
+                        currentSong = currentSong,
+                        modifier = Modifier.fillMaxWidth(0.58f).aspectRatio(1f)
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    SongMetaText(
+                        currentSong = currentSong,
+                        currentPlayQuality = currentPlayQuality,
+                        nameFontSize = 20.sp,
+                        singerFontSize = 13.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                // 下：歌词占剩余空间
+                LyricPanel(
+                    currentSong = currentSong,
+                    lyric = currentLyric,
+                    translation = currentLyricTranslation,
+                    currentTimeMs = (progress * totalDurationMs).toLong(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(vertical = 10.dp)
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 48.dp)
+                    .focusRequester(focusRequester)
+                    .focusable(),
+                horizontalArrangement = Arrangement.spacedBy(48.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 左侧：封面 + 歌名 + 歌手（垂直居中堆叠）
+                Column(
+                    modifier = Modifier.weight(0.42f),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    GlassAlbumCover(
+                        currentSong = currentSong,
+                        modifier = Modifier.fillMaxWidth(0.78f).aspectRatio(1f)
+                    )
+                    Spacer(modifier = Modifier.height(22.dp))
+                    SongMetaText(
+                        currentSong = currentSong,
+                        currentPlayQuality = currentPlayQuality,
+                        nameFontSize = 24.sp,
+                        singerFontSize = 15.sp
+                    )
+                }
+
+                // 右侧：歌词（2.8 翻译歌词：开关已在 PlayerScreen 层过滤，null 表示不显示）
+                LyricPanel(
+                    currentSong = currentSong,
+                    lyric = currentLyric,
+                    translation = currentLyricTranslation,
+                    currentTimeMs = (progress * totalDurationMs).toLong(),
+                    modifier = Modifier.weight(0.58f).fillMaxHeight().padding(vertical = 24.dp)
                 )
             }
         }
+    }
+}
 
-        // 右侧：歌词（2.8 翻译歌词：开关已在 PlayerScreen 层过滤，null 表示不显示）
-        LyricPanel(
-            currentSong = currentSong,
-            lyric = currentLyric,
-            translation = currentLyricTranslation,
-            currentTimeMs = (progress * totalDurationMs).toLong(),
-            modifier = Modifier.weight(0.58f).fillMaxHeight().padding(vertical = 24.dp)
+/**
+ * 封面下方的歌名/歌手/音质文字块（2.9 提取复用：横竖屏两套布局共用，字号按场景传入）
+ */
+@Composable
+private fun SongMetaText(
+    currentSong: Song?,
+    currentPlayQuality: AudioQuality?,
+    nameFontSize: TextUnit,
+    singerFontSize: TextUnit
+) {
+    Text(
+        text = currentSong?.name ?: "未在播放",
+        fontSize = nameFontSize,
+        fontWeight = FontWeight.Bold,
+        color = Color.White,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        textAlign = TextAlign.Center
+    )
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(
+        text = currentSong?.singer ?: "选择一首歌开始播放",
+        fontSize = singerFontSize,
+        color = Color.White.copy(alpha = 0.65f),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        textAlign = TextAlign.Center
+    )
+    // 2.8 歌手下方显示当前真实播放音质（ExoPlayer 解析；解析前/未知格式显示「未知」）
+    if (currentSong != null) {
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = currentPlayQuality?.let {
+                when (it) {
+                    AudioQuality.QUALITY_128K -> "标准 128K"
+                    AudioQuality.QUALITY_320K -> "高品质 320K"
+                    AudioQuality.FLAC -> "无损 flac"
+                    AudioQuality.FLAC_24BIT -> "Hi-Res flac24bit"
+                }
+            } ?: "未知",
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White.copy(alpha = 0.5f),
+            letterSpacing = 2.sp,
+            maxLines = 1,
+            textAlign = TextAlign.Center
         )
     }
 }
@@ -539,11 +608,18 @@ private fun PlayerBottomBar(
         PlayMode.LOOP_SINGLE -> Icons.Default.RepeatOne
     }
 
+    // 2.9 竖屏/窄屏适配：窄屏收紧边距与按钮间距，保证控制栏一排放得下
+    //（56dp 边距+28dp 间距是电视大屏尺寸，手机竖屏下按钮排会溢出）
+    val isNarrow = LocalConfiguration.current.screenWidthDp < 600
+    val hPadding = if (isNarrow) 20.dp else 56.dp
+    val centerGap = if (isNarrow) 12.dp else 28.dp
+    val rightGap = if (isNarrow) 10.dp else 20.dp
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             // 顶层覆盖 + 完全透明背景：不遮挡封面与歌词（仿菠萝 layoutBottomControls 浮层）
-            .padding(horizontal = 56.dp)
+            .padding(horizontal = hPadding)
             .padding(top = 32.dp, bottom = 24.dp)
     ) {
         // ===== 进度条（参考菠萝音乐：时间在上方 + 聚焦圆环 thumb）=====
@@ -600,7 +676,7 @@ private fun PlayerBottomBar(
                 )
             }
 
-            Spacer(modifier = Modifier.width(28.dp))
+            Spacer(modifier = Modifier.width(centerGap))
 
             ControlCircleButton(
                 onClick = onPlayPause,
@@ -617,7 +693,7 @@ private fun PlayerBottomBar(
                 )
             }
 
-            Spacer(modifier = Modifier.width(28.dp))
+            Spacer(modifier = Modifier.width(centerGap))
 
             ControlCircleButton(
                 onClick = onNext,
@@ -646,7 +722,7 @@ private fun PlayerBottomBar(
                 )
             }
 
-            Spacer(modifier = Modifier.width(20.dp))
+            Spacer(modifier = Modifier.width(rightGap))
 
             ControlCircleButton(
                 onClick = onPlayModeMenuToggle,
