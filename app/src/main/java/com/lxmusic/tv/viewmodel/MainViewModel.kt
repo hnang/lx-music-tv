@@ -1664,7 +1664,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // ① 当前平台没有任何可用音源（未添加/未启用/平台配置都排除了）：直接停住并提示，不自动跳曲
         val hasAvailableSource = try {
             sourceManager.getSourcesForPlatform(song.platform.key).isNotEmpty()
-        } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
             true
         }
         if (!hasAvailableSource) {

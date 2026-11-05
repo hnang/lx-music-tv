@@ -372,7 +372,7 @@ class SourceExecutor(
                     SourceExecutionResult.Error("获取播放URL失败: ${result.message}")
                 }
             }
-        } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
             Log.e(TAG, "[dispatchMusicUrlRequest] 异常", e)
             SourceExecutionResult.Error("获取播放URL时出错: ${e.message}")
         }

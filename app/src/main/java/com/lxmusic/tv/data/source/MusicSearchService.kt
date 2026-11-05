@@ -557,12 +557,10 @@ class MusicSearchService(
                 // URL 缓存写原歌曲 key（缓存锚定歌曲身份，平台切换不分裂缓存；下次直接命中，不再反复解析）
                 try {
                     CacheManager.putUrl(CacheManager.songCacheKey(song, quality), result.url)
-                } catch (e: kotlinx.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) { throw e } catch (e: Exception) {
                     Log.w(TAG, "写入换源 URL 缓存失败: ${e.message}")
                 }
                 return MusicPlayResult(result.url, result.quality ?: quality, source.id, actualPlatformKey = platform.key)
-            }
-                return MusicPlayResult(result.url, quality, source.id, actualPlatformKey = platform.key)
             }
             Log.w(TAG, "JS源[${source.name}]切换平台到${platform.displayName}失败: ${song.name}")
         }
