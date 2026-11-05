@@ -69,6 +69,7 @@ import com.lxmusic.tv.data.model.MusicPlatform
 import com.lxmusic.tv.data.model.SearchType
 import com.lxmusic.tv.data.model.Song
 import com.lxmusic.tv.presentation.component.RemoteImage
+import com.lxmusic.tv.presentation.component.DownloadButton
 import com.lxmusic.tv.presentation.component.lxBackButtonFocus
 import com.lxmusic.tv.presentation.component.lxFocusBorder
 import com.lxmusic.tv.presentation.component.lxSelectorFocus
@@ -1869,6 +1870,11 @@ Text(
                     onClick = onToggleFavorite
                 )
             }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            // ④ 下载（2.9：任务状态与回调来自全局 CompositionLocal，见 DownloadButton）
+            DownloadButton(song = song, tint = LXOnCardDark)
         }
     }
 }

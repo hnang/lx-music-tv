@@ -26,9 +26,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lxmusic.tv.data.cache.CacheManager
+import com.lxmusic.tv.data.download.DownloadState
+import com.lxmusic.tv.data.download.DownloadTask
 import com.lxmusic.tv.data.model.MusicPlatform
 import com.lxmusic.tv.data.model.Song
 import com.lxmusic.tv.presentation.component.RemoteImage
+import com.lxmusic.tv.presentation.component.LocalDownloadOnCancel
+import com.lxmusic.tv.presentation.component.LocalDownloadOnRequest
+import com.lxmusic.tv.presentation.component.LocalDownloadTasks
 import com.lxmusic.tv.presentation.component.lxCircleButtonFocus
 import com.lxmusic.tv.presentation.component.lxFocusBorder
 import com.lxmusic.tv.presentation.theme.LXCardDark
@@ -124,6 +129,9 @@ fun LocalCacheScreen(
                 val totalSizeFormatted = remember(totalBytes) { CacheManager.formatCacheSize(totalBytes) }
 
                 Column(modifier = Modifier.fillMaxSize()) {
+                    // 2.9 下载任务区块（进行中/排队/失败，不显示已完成——已完成即入下方本地歌曲）
+                    DownloadTasksSection()
+
                     // 顶部统计信息
                     Row(
                         modifier = Modifier
@@ -457,4 +465,114 @@ private fun DeleteCacheConfirmDialog(
             }
         }
     )
+}
+
+/**
+ * 2.9 下载任务区块：展示进行中/排队/失败的下载任务（已完成任务直接进入上方本地歌曲列表，不重复展示）
+ */
+@Composable
+private fun DownloadTasksSection() {
+    val tasks = LocalDownloadTasks.current
+    val activeTasks = tasks.filter { it.state != DownloadState.COMPLETED }
+    if (activeTasks.isEmpty()) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+    ) {
+        Text(
+            text = "下载任务",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = LXTextPrimary,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        activeTasks.forEach { task ->
+            DownloadTaskRow(task)
+        }
+    }
+}
+
+/**
+ * 单个下载任务行：歌名/歌手 + 状态或进度 + 取消/重试按钮
+ */
+@Composable
+private fun DownloadTaskRow(task: DownloadTask) {
+    val onCancel = LocalDownloadOnCancel.current
+    val onRequest = LocalDownloadOnRequest.current
+    Card(
+        colors = CardDefaults.cardColors(containerColor = LXCardDark),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = task.song.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = LXOnCardDark,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = when (task.state) {
+                        DownloadState.WAITING -> "排队等待中"
+                        DownloadState.DOWNLOADING -> if (task.progress > 0f) "下载中 ${(task.progress * 100).toInt()}%" else "正在解析音源..."
+                        DownloadState.FAILED -> task.error?.let { "下载失败：$it" } ?: "下载失败"
+                        DownloadState.CANCELLED -> "已取消"
+                        else -> ""
+                    },
+                    fontSize = 12.sp,
+                    color = LXOnCardDarkSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            // 下载中：进度环（点击取消）；失败：重试（重新入队）
+            when (task.state) {
+                DownloadState.DOWNLOADING -> {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .lxCircleButtonFocus()
+                            .clickable { onCancel(task.key) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            progress = { task.progress.coerceIn(0f, 1f) },
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 3.dp,
+                            color = LXPrimary,
+                            trackColor = LXOnCardDark.copy(alpha = 0.2f)
+                        )
+                    }
+                }
+                DownloadState.WAITING, DownloadState.CANCELLED -> {
+                    Text("排队中", fontSize = 12.sp, color = LXOnCardDarkSecondary, modifier = Modifier.padding(horizontal = 12.dp))
+                }
+                DownloadState.FAILED -> {
+                    // 重试：重新弹音质选择并入队
+                    Box(
+                        modifier = Modifier.size(38.dp).lxCircleButtonFocus().clickable {
+                            onRequest(task.song)
+                        },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "重试下载",
+                            tint = LXOnCardDark,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+                else -> {}
+            }
+        }
+    }
 }

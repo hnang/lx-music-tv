@@ -45,6 +45,10 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.navigation.compose.currentBackStackEntryAsState
 import com.lxmusic.tv.presentation.component.lxBackButtonFocus
 import com.lxmusic.tv.presentation.component.RemoteImage
+import com.lxmusic.tv.presentation.component.DownloadQualityDialog
+import com.lxmusic.tv.presentation.component.LocalDownloadOnCancel
+import com.lxmusic.tv.presentation.component.LocalDownloadOnRequest
+import com.lxmusic.tv.presentation.component.LocalDownloadTasks
 import com.lxmusic.tv.presentation.screen.MainScreen
 import com.lxmusic.tv.presentation.screen.CacheManageScreen
 import com.lxmusic.tv.presentation.screen.PlayerScreen
@@ -186,6 +190,15 @@ fun LXMusicApp() {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // 2.9 下载：全局任务状态 + 音质选择目标（CompositionLocal 下发，首页/播放页免层层传参）
+        val downloadTasks by viewModel.downloadTasks.collectAsState()
+        val downloadTarget by viewModel.downloadTarget.collectAsState()
+
+        CompositionLocalProvider(
+            LocalDownloadTasks provides downloadTasks,
+            LocalDownloadOnRequest provides { song -> viewModel.requestDownload(song) },
+            LocalDownloadOnCancel provides { key -> viewModel.cancelDownload(key) }
+        ) {
     NavHost(
         navController = navController,
         startDestination = "main",
@@ -603,6 +616,16 @@ fun LXMusicApp() {
             )
         }
     }
+        }
+
+        // 2.9 下载音质选择弹窗（任意入口触发 requestDownload 都会显示）
+        if (downloadTarget != null) {
+            DownloadQualityDialog(
+                song = downloadTarget!!,
+                onSelect = { song, quality -> viewModel.startDownload(song, quality) },
+                onDismiss = { viewModel.dismissDownloadDialog() }
+            )
+        }
 
         // 悬浮「正在播放」按钮：非播放页且有歌曲播放时显示（含首页），点击进入播放页。
         // 置于右上角；搜索结果页的「歌曲/歌单」切换按钮已左移为其让位（见 SearchResultScreen）。

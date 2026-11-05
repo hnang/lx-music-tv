@@ -66,6 +66,7 @@ import com.lxmusic.tv.data.model.PlayMode
 import com.lxmusic.tv.data.model.Song
 import com.lxmusic.tv.presentation.component.RemoteImage
 import com.lxmusic.tv.presentation.component.requestInitialFocus
+import com.lxmusic.tv.presentation.component.DownloadButton
 import com.lxmusic.tv.presentation.theme.FocusBorder
 import com.lxmusic.tv.presentation.theme.LXCardDark
 import com.lxmusic.tv.presentation.theme.LXPrimary
@@ -659,6 +660,12 @@ private fun PlayerBottomBar(
                     tint = Color.White,
                     modifier = Modifier.size(28.dp)
                 )
+            }
+
+            // 下载当前曲目（2.9：任务状态与回调来自全局 CompositionLocal）
+            if (currentSong != null) {
+                Spacer(modifier = Modifier.width(12.dp))
+                DownloadButton(song = currentSong!!, tint = Color.White)
             }
 
             Spacer(modifier = Modifier.weight(1f))

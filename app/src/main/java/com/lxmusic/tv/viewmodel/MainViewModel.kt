@@ -11,6 +11,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lxmusic.tv.LXMusicApplication
 import com.lxmusic.tv.data.cache.CacheManager
+import com.lxmusic.tv.data.download.DownloadManager
+import com.lxmusic.tv.data.download.DownloadState
+import com.lxmusic.tv.data.download.DownloadTask
 import com.lxmusic.tv.data.model.*
 import com.lxmusic.tv.presentation.theme.LX_THEME_PREFS
 import com.lxmusic.tv.data.source.BrowseDataService
@@ -56,6 +59,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val sourceManager = app.sourceManager
     private val dataStoreManager = app.dataStoreManager
     private val searchService = MusicSearchService(sourceManager)
+
+    // 2.9 下载管理器：复用 SimpleCache 体系，下载完进「本地」Tab 离线可播；串行队列 + 进度 + 取消
+    private val downloadManager = DownloadManager(
+        app,
+        urlProvider = { song, quality -> searchService.getMusicUrl(song, quality, enablePlatformSwitch = true) }
+    )
+    val downloadTasks: StateFlow<List<DownloadTask>> = downloadManager.tasks
+
+    // 2.9 下载音质选择弹窗的目标歌曲（null = 未请求/已关闭）
+    private val _downloadTarget = MutableStateFlow<Song?>(null)
+    val downloadTarget: StateFlow<Song?> = _downloadTarget.asStateFlow()
     private val browseDataService = BrowseDataService()
     private val suggestEngine = SearchSuggestEngine()
 
@@ -1723,6 +1737,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playerService?.rebuildForCacheCleared()
     }
 
+    // ========== 2.9 下载 ==========
+
+    /** 请求下载：UI 监听 downloadTarget 弹出音质选择弹窗 */
+    fun requestDownload(song: Song) {
+        _downloadTarget.value = song
+    }
+
+    /** 确认音质后开始下载 */
+    fun startDownload(song: Song, quality: AudioQuality) {
+        downloadManager.enqueue(song, quality)
+        _downloadTarget.value = null
+        _toastMessage.value = "已加入下载队列"
+    }
+
+    /** 取消下载 */
+    fun cancelDownload(key: String) {
+        downloadManager.cancel(key)
+    }
+
+    /** 关闭音质选择弹窗（不下载） */
+    fun dismissDownloadDialog() {
+        _downloadTarget.value = null
+    }
+
     /**
      * 播放/暂停切换
      */
@@ -2522,6 +2560,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        downloadManager.release()
         Log.d("LX-MainViewModel", "[service] onCleared, isServiceBound=$isServiceBound")
         // 解绑服务
         if (isServiceBound) {
